@@ -56,26 +56,34 @@ jobs:
 
           Start-Sleep -Seconds 10
 
-          $cfg = "C:\Program Files\uvnc bvba\UltraVNC\ultravnc.ini"
-
-          if (Test-Path $cfg) {
-
-            (Get-Content $cfg) `
-              -replace "LoopbackOnly=0","LoopbackOnly=1" `
-              -replace "AllowLoopback=0","AllowLoopback=1" `
-              | Set-Content $cfg
-
+          Write-Host ""
+          Write-Host "Installed UltraVNC services:"
+          Get-Service | Where-Object {
+            $_.Name -match "uvnc|vnc"
           }
 
-          Start-Service uvnc_service
+          $svc = Get-Service | Where-Object {
+            $_.Name -match "uvnc"
+          } | Select-Object -First 1
+
+          if (-not $svc) {
+            Write-Host "[ERROR] UltraVNC service not found"
+            exit 1
+          }
+
+          Write-Host ""
+          Write-Host "[OK] Found service: $($svc.Name)"
+
+          Start-Service $svc.Name
+
           Start-Sleep -Seconds 15
 
           $test = Test-NetConnection localhost -Port 5900
 
           if ($test.TcpTestSucceeded) {
-            Write-Host "[OK] UltraVNC running on 5900"
+            Write-Host "[OK] UltraVNC listening on 5900"
           } else {
-            Write-Host "[ERROR] UltraVNC failed"
+            Write-Host "[ERROR] UltraVNC not responding"
             exit 1
           }
 
