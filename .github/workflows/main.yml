@@ -1,0 +1,104 @@
+name: Premium Windows RDP via Cloudflare Tunnel
+
+on:
+  workflow_dispatch:
+
+jobs:
+  rdp:
+    name: Windows RDP
+    runs-on: windows-2025
+    timeout-minutes: 360
+
+    steps:
+      - name: Enable Remote Desktop
+        shell: powershell
+        run: |
+          Write-Host "========================================"
+          Write-Host " Enabling Premium Windows RDP"
+          Write-Host "========================================"
+
+          # Create admin user
+          net user runneradmin "P@ssw0rd123!" /add
+          net localgroup administrators runneradmin /add
+
+          # Enable RDP
+          Set-ItemProperty `
+            -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
+            -Name "fDenyTSConnections" `
+            -Value 0
+
+          # Enable firewall rules
+          Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
+
+          # Disable NLA for easier login
+          Set-ItemProperty `
+            -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
+            -Name "UserAuthentication" `
+            -Value 0
+
+          # Set high performance
+          powercfg /setactive SCHEME_MIN
+
+          # Disable sleep
+          powercfg -change -standby-timeout-ac 0
+          powercfg -change -hibernate-timeout-ac 0
+
+          Write-Host "RDP ENABLED"
+
+      - name: Install Essential Tools
+        shell: powershell
+        run: |
+          choco install googlechrome -y --ignore-checksums
+          choco install 7zip -y
+          choco install git -y
+
+      - name: Download Cloudflared
+        shell: powershell
+        run: |
+          Invoke-WebRequest `
+            -Uri "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe" `
+            -OutFile "cloudflared.exe"
+
+      - name: Start Cloudflare TCP Tunnel
+        shell: powershell
+        run: |
+          Write-Host "Starting Cloudflare Tunnel..."
+
+          Start-Process `
+            -FilePath ".\cloudflared.exe" `
+            -ArgumentList "tunnel --url tcp://localhost:3389 --no-autoupdate" `
+            -RedirectStandardOutput "cf.log" `
+            -RedirectStandardError "cf-error.log" `
+            -WindowStyle Hidden
+
+          Start-Sleep -Seconds 20
+
+          Write-Host ""
+          Write-Host "========================================"
+          Write-Host " CLOUDFARE RDP INFORMATION"
+          Write-Host "========================================"
+          Write-Host ""
+
+          Get-Content cf.log
+
+          Write-Host ""
+          Write-Host "========================================"
+          Write-Host " LOGIN DETAILS"
+          Write-Host "========================================"
+          Write-Host ""
+          Write-Host "Username : runneradmin"
+          Write-Host "Password : P@ssw0rd123!"
+          Write-Host ""
+          Write-Host "Connect using Windows Remote Desktop"
+          Write-Host ""
+
+      - name: Keep Runner Alive
+        shell: powershell
+        run: |
+          Write-Host "Keeping runner alive..."
+
+          while ($true) {
+            $time = Get-Date -Format "HH:mm:ss"
+            Write-Host "[$time] RDP Session Running..."
+            Start-Sleep -Seconds 300
+          }
