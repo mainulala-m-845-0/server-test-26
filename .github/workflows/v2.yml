@@ -95,7 +95,7 @@ jobs:
           $password = "Rdp1234!"
           $secPassword = ConvertTo-SecureString $password -AsPlainText -Force
 
-          # Remove user if already exists (Using PowerShell cmdlets prevents NativeCommandError crash)
+          # Remove user if already exists
           if (Get-LocalUser -Name $username -ErrorAction SilentlyContinue) {
             Remove-LocalUser -Name $username -ErrorAction SilentlyContinue
             Write-Host "[OK] Existing user '$username' removed"
@@ -120,9 +120,18 @@ jobs:
           # Disable NLA (Required for easy passwords/tunnels)
           Set-ItemProperty -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" -Name "UserAuthentication" -Value 0 -Type DWord
           
-          # Force RDP Security Layer instead of TLS (CRITICAL FOR CLOUDFLARE TUNNELS)
+          # Force RDP Security Layer (CRITICAL FOR CLOUDFLARE TUNNELS - TLS handshakes break over WebSockets)
           Set-ItemProperty -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" -Name "SecurityLayer" -Value 0 -Type DWord
-          Write-Host "[OK] NLA disabled and Security Layer optimized for Tunnel"
+          
+          # Set Minimum Encryption Level to Low (Compatible with RDP Security)
+          Set-ItemProperty -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" -Name "MinEncryptionLevel" -Value 1 -Type DWord
+          
+          # Disable RDP UDP (CRITICAL: Cloudflare Tunnels are strictly TCP. UDP negotiation causes black screens/drops)
+          New-Item -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services" -Force | Out-Null
+          Set-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services" -Name "fClientDisableUDP" -Value 1 -Type DWord
+          Set-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services" -Name "fServerDisableUDP" -Value 1 -Type DWord
+          
+          Write-Host "[OK] NLA disabled, Security Layer optimized, and RDP UDP disabled for Tunnel"
 
           # Allow multiple concurrent RDP sessions
           Set-ItemProperty -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server" -Name "fSingleSessionPerUser" -Value 0 -Type DWord
@@ -235,7 +244,6 @@ jobs:
           Write-Host ""
 
           if ($tunnelUrl -ne "") {
-            # Save URL to file so Step 5 can track it if it changes
             $tunnelUrl | Out-File "C:\tunnel-url.txt" -Encoding UTF8
             
             $rdpHost = $tunnelUrl -replace "https://", ""
@@ -243,7 +251,7 @@ jobs:
             Write-Host "  RDP Host    : $rdpHost"
             Write-Host "  RDP Port    : 443 (via Cloudflare)"
             Write-Host ""
-            Write-Host "  Username    : rdpadmin"
+            Write-Host "  Username    : .\rdpadmin"
             Write-Host "  Password    : Rdp1234!"
             Write-Host ""
             Write-Host "========================================"
@@ -251,13 +259,13 @@ jobs:
             Write-Host "========================================"
             Write-Host ""
             Write-Host "  1. Install cloudflared on your local PC"
-            Write-Host "  2. Run this command on YOUR local machine (CMD as Admin):"
+            Write-Host "  2. Open CMD as Admin on YOUR PC and run:"
             Write-Host ""
             Write-Host "     cloudflared access tcp --hostname $rdpHost --url localhost:13389"
             Write-Host ""
             Write-Host "  3. Open Remote Desktop (mstsc) and connect:"
             Write-Host "     Host     : localhost:13389"
-            Write-Host "     Username : rdpadmin"
+            Write-Host "     Username : .\rdpadmin  <-- MUST USE .\ BEFORE USERNAME"
             Write-Host "     Password : Rdp1234!"
           } else {
             Write-Host "  [WARN] Tunnel URL not detected. Check logs below."
@@ -297,7 +305,6 @@ jobs:
               if (-not $rdp) {
                 Write-Host "[$timeStr] [WARN] RDP port down - restarting TermService..."
                 Restart-Service -Name TermService -Force -ErrorAction SilentlyContinue
-                # Restarting TermService severs cloudflared's TCP link. We must restart cloudflared too.
                 Get-Process -Name "cloudflared" -ErrorAction SilentlyContinue | Stop-Process -Force
                 Start-Sleep -Seconds 5
               }
@@ -307,7 +314,6 @@ jobs:
               if (-not $cf) {
                 Write-Host "[$timeStr] [WARN] Cloudflared stopped - restarting..."
                 
-                # Clean old logs to ensure we only read the new URL
                 $rlOut = "$env:TEMP\cf-restart-out.log"
                 $rlErr = "$env:TEMP\cf-restart-err.log"
                 Remove-Item $rlOut, $rlErr -Force -ErrorAction SilentlyContinue
@@ -315,7 +321,6 @@ jobs:
                 Start-Process -FilePath $cfExe -ArgumentList $tunnelArgs -RedirectStandardOutput $rlOut -RedirectStandardError $rlErr -NoNewWindow
                 Start-Sleep -Seconds 5
                 
-                # Poll for the NEW tunnel URL (max 30 seconds)
                 $newUrl = ""
                 for ($i = 0; $i -lt 10; $i++) {
                   Start-Sleep -Seconds 3
@@ -327,7 +332,6 @@ jobs:
                 }
                 
                 if ($newUrl) {
-                  # Save and print the new URL so the user can reconnect!
                   $newUrl | Out-File "C:\tunnel-url.txt" -Encoding UTF8
                   $newHost = $newUrl -replace "https://", ""
                   Write-Host "[$timeStr] [!!!] TUNNEL URL CHANGED! Reconnect with these details [!!!]"
