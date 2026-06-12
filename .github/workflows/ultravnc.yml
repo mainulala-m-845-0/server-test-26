@@ -6,7 +6,7 @@ on:
 jobs:
   windows-vnc:
     name: Windows noVNC Cloudflare
-    runs-on: windows-2025
+    runs-on: windows-2022
     timeout-minutes: 360
 
     steps:
