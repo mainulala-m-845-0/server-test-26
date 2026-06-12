@@ -67,11 +67,11 @@ jobs:
           Write-Host "========================================"
           Write-Host ""
 
-          # 1. Install TightVNC using Chocolatey (Pre-installed on GitHub Runners)
+          # 1. Install TightVNC using Chocolatey
           Write-Host "  Installing TightVNC Server..."
           choco install tightvnc -y --no-progress
           
-          # 2. Configure TightVNC to allow connections without a password (Cloudflare provides the security)
+          # 2. Configure TightVNC
           Write-Host "  Configuring TightVNC..."
           $regPath = "HKLM:\SOFTWARE\TightVNC\Server"
           Set-ItemProperty -Path $regPath -Name "AcceptRfbConnections" -Value 1 -Type DWord
@@ -79,11 +79,16 @@ jobs:
           Set-ItemProperty -Path $regPath -Name "AllowLoopback" -Value 1 -Type DWord
           Set-ItemProperty -Path $regPath -Name "LoopbackOnly" -Value 1 -Type DWord
           
-          # Restart VNC service to apply changes
+          # Restart VNC service
           Restart-Service tvnserver -Force
+          Start-Sleep -Seconds 3
           Write-Host "[OK] TightVNC installed and configured"
 
-          # 3. Install Websockify (Python tool to bridge VNC to WebSockets)
+          # Verify VNC is listening on 5900
+          $vncListen = Get-NetTCPConnection -LocalPort 5900 -State Listen -ErrorAction SilentlyContinue
+          if ($vncListen) { Write-Host "[OK] VNC Server listening on port 5900" } else { Write-Host "[WARN] VNC not listening on 5900 yet" }
+
+          # 3. Install Websockify
           Write-Host "  Installing Websockify..."
           pip install websockify --quiet
           Write-Host "[OK] Websockify installed"
@@ -96,9 +101,20 @@ jobs:
 
           # 5. Start Websockify (Bridges Port 6080 Web to Port 5900 VNC)
           Write-Host "  Starting Websockify on port 6080..."
-          Start-Process python -ArgumentList "-m", "websockify", "--web", "C:\noVNC", "6080", "localhost:5900" -NoNewWindow
-          Start-Sleep -Seconds 3
-          Write-Host "[OK] Websockify started"
+          $wsOut = "C:\ws-out.log"
+          $wsErr = "C:\ws-err.log"
+          Start-Process python -ArgumentList "-m", "websockify", "--web", "C:\noVNC", "6080", "localhost:5900" -RedirectStandardOutput $wsOut -RedirectStandardError $wsErr -NoNewWindow
+          Start-Sleep -Seconds 5
+          
+          # Verify Websockify is listening
+          $wsListen = Get-NetTCPConnection -LocalPort 6080 -State Listen -ErrorAction SilentlyContinue
+          if ($wsListen) {
+            Write-Host "[OK] Websockify listening on port 6080"
+          } else {
+            Write-Host "[ERROR] Websockify failed to start. Error log:"
+            Get-Content $wsErr -ErrorAction SilentlyContinue
+            exit 1
+          }
 
       # --------------------------------------------------------
       # STEP 3 - Download Cloudflared
@@ -135,8 +151,8 @@ jobs:
           $logErr = "$env:TEMP\cf-err.log"
           Remove-Item $logOut, $logErr -Force -ErrorAction SilentlyContinue
 
-          # Exposing Port 6080 (Websockify/noVNC) instead of 3389 (RDP)
-          $proc = Start-Process -FilePath "C:\cloudflared.exe" -ArgumentList "tunnel --url http://localhost:6089 --no-autoupdate --loglevel info" -RedirectStandardOutput $logOut -RedirectStandardError $logErr -NoNewWindow -PassThru
+          # FIXED: Exposing Port 6080 correctly
+          $proc = Start-Process -FilePath "C:\cloudflared.exe" -ArgumentList "tunnel --url http://localhost:6080 --no-autoupdate --loglevel info" -RedirectStandardOutput $logOut -RedirectStandardError $logErr -NoNewWindow -PassThru
           Write-Host "[OK] Cloudflared started - PID: $($proc.Id)"
           Write-Host "  Waiting for tunnel URL (max 90 seconds)..."
 
@@ -161,7 +177,7 @@ jobs:
             }
 
             if ($proc.HasExited -and $tunnelUrl -eq "") {
-              Write-Host "[ERROR] Cloudflared exited prematurely."
+              Write-Host "[ERROR] Cloudflared exited prematurely. Error log:"
               Get-Content $logErr -ErrorAction SilentlyContinue
               exit 1
             }
@@ -191,10 +207,8 @@ jobs:
             Write-Host ""
             Write-Host "  3. Click the 'Connect' button on the webpage."
             Write-Host "  4. You will instantly see the Windows Desktop!"
-            Write-Host ""
-            Write-Host "  NOTE: No password required. Cloudflare Tunnel secures the connection."
           } else {
-            Write-Host "  [WARN] Tunnel URL not detected. Check logs below."
+            Write-Host "  [WARN] Tunnel URL not detected. Error log:"
             Get-Content $logErr -ErrorAction SilentlyContinue
           }
 
@@ -212,6 +226,7 @@ jobs:
           $startTime  = Get-Date
           $iteration  = 0
           $cfExe      = "C:\cloudflared.exe"
+          # FIXED: Port 6080 here as well
           $tunnelArgs = "tunnel --url http://localhost:6080 --no-autoupdate"
 
           while ($true) {
