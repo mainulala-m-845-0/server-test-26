@@ -93,18 +93,24 @@ jobs:
 
           $username = "rdpadmin"
           $password = "Rdp1234!"
+          $secPassword = ConvertTo-SecureString $password -AsPlainText -Force
 
-          # Use cmd /c to avoid PowerShell NativeCommandError spam and ensure accurate exit codes
-          & cmd /c "net user $username /delete" 2>&1 | Out-Null
-          Write-Host "[OK] Cleaned up existing user (if any)"
+          # Remove user if already exists (Using PowerShell cmdlets prevents NativeCommandError crash)
+          if (Get-LocalUser -Name $username -ErrorAction SilentlyContinue) {
+            Remove-LocalUser -Name $username -ErrorAction SilentlyContinue
+            Write-Host "[OK] Existing user '$username' removed"
+          } else {
+            Write-Host "[INFO] No existing user found - continuing..."
+          }
 
-          & cmd /c "net user $username $password /add /expires:never /passwordchg:no"
-          if ($LASTEXITCODE -ne 0) { Write-Error "Failed to create user"; exit 1 }
+          # Create new admin user
+          New-LocalUser -Name $username -Password $secPassword -NoPasswordExpiration -UserMayNotChangePassword -ErrorAction Stop
           Write-Host "[OK] User '$username' created"
 
-          & cmd /c "net localgroup Administrators $username /add" 2>&1 | Out-Null
-          & cmd /c "net localgroup `"Remote Desktop Users`" $username /add" 2>&1 | Out-Null
-          & cmd /c "net localgroup Administrators runneradmin /add" 2>&1 | Out-Null
+          # Add to groups
+          Add-LocalGroupMember -Group "Administrators" -Member $username -ErrorAction SilentlyContinue
+          Add-LocalGroupMember -Group "Remote Desktop Users" -Member $username -ErrorAction SilentlyContinue
+          Add-LocalGroupMember -Group "Administrators" -Member "runneradmin" -ErrorAction SilentlyContinue
           Write-Host "[OK] User added to Administrators and RDP Users"
 
           # Enable RDP
@@ -346,5 +352,5 @@ jobs:
         shell: powershell
         run: |
           Get-Process -Name "cloudflared" -ErrorAction SilentlyContinue | Stop-Process -Force
-          & cmd /c "net user rdpadmin /delete" 2>&1 | Out-Null
+          Remove-LocalUser -Name "rdpadmin" -ErrorAction SilentlyContinue
           Write-Host "[OK] Cleanup complete - cancelled workflow"
