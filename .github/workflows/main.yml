@@ -5,100 +5,345 @@ on:
 
 jobs:
   rdp:
-    name: Windows RDP
+    name: Premium Windows RDP
     runs-on: windows-2025
     timeout-minutes: 360
 
     steps:
-      - name: Enable Remote Desktop
+      # ──────────────────────────────────────────
+      # STEP 1 – System Optimizations
+      # ──────────────────────────────────────────
+      - name: System Performance Optimization
         shell: powershell
         run: |
           Write-Host "========================================"
-          Write-Host " Enabling Premium Windows RDP"
+          Write-Host "   System Performance Optimization      "
           Write-Host "========================================"
 
-          # Create admin user
-          net user runneradmin "P@ssw0rd123!" /add
-          net localgroup administrators runneradmin /add
+          # High Performance power plan (use GUID – SCHEME_MIN may not exist)
+          $hp = powercfg -list | Select-String "High performance"
+          if ($hp) {
+            $guid = ($hp -split "\s+")[3]
+            powercfg /setactive $guid
+            Write-Host "[OK] High Performance power plan activated: $guid"
+          } else {
+            # Fallback: create and activate balanced with tweaks
+            powercfg /setactive SCHEME_BALANCED
+            Write-Host "[WARN] High Performance plan not found, using Balanced"
+          }
 
-          # Enable RDP
-          Set-ItemProperty `
-            -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
-            -Name "fDenyTSConnections" `
-            -Value 0
-
-          # Enable firewall rules
-          Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
-
-          # Disable NLA for easier login
-          Set-ItemProperty `
-            -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
-            -Name "UserAuthentication" `
-            -Value 0
-
-          # Set high performance
-          powercfg /setactive SCHEME_MIN
-
-          # Disable sleep
-          powercfg -change -standby-timeout-ac 0
+          # Disable sleep / hibernate / display-off on AC
+          powercfg -change -standby-timeout-ac  0
           powercfg -change -hibernate-timeout-ac 0
+          powercfg -change -monitor-timeout-ac   0
 
-          Write-Host "RDP ENABLED"
+          # Disable Windows Update during session
+          Stop-Service -Name wuauserv -Force -ErrorAction SilentlyContinue
+          Set-Service  -Name wuauserv -StartupType Disabled -ErrorAction SilentlyContinue
+          Write-Host "[OK] Windows Update disabled"
 
+          # Disable Superfetch / SysMain to free RAM
+          Stop-Service -Name SysMain -Force -ErrorAction SilentlyContinue
+          Set-Service  -Name SysMain -StartupType Disabled -ErrorAction SilentlyContinue
+          Write-Host "[OK] SysMain disabled"
+
+          # Increase network throughput
+          netsh int tcp set global autotuninglevel=normal
+          netsh int tcp set global chimney=enabled
+          netsh int tcp set global dca=enabled
+          netsh int tcp set global netdma=enabled
+          netsh int tcp set global ecncapability=enabled
+          Write-Host "[OK] TCP stack optimized"
+
+          # Set DNS to Cloudflare for speed
+          $adapters = Get-NetAdapter | Where-Object { $_.Status -eq "Up" }
+          foreach ($a in $adapters) {
+            Set-DnsClientServerAddress -InterfaceIndex $a.ifIndex `
+              -ServerAddresses ("1.1.1.1","1.0.0.1") -ErrorAction SilentlyContinue
+          }
+          Write-Host "[OK] DNS set to Cloudflare 1.1.1.1"
+
+          Write-Host "========================================"
+          Write-Host "   Optimization Complete                "
+          Write-Host "========================================"
+
+      # ──────────────────────────────────────────
+      # STEP 2 – Create Admin User & Enable RDP
+      # ──────────────────────────────────────────
+      - name: Enable Remote Desktop & Create User
+        shell: powershell
+        run: |
+          Write-Host "========================================"
+          Write-Host "   Enabling Premium Windows RDP         "
+          Write-Host "========================================"
+
+          # ── Create dedicated RDP admin user ──────────────────────────
+          $username = "rdpadmin"
+          $password = "Premium@RDP2025!"
+
+          # Remove if already exists
+          net user $username /delete 2>$null
+
+          net user $username $password /add /expires:never /passwordchg:no
+          net localgroup Administrators     $username /add
+          net localgroup "Remote Desktop Users" $username /add /ErrorAction SilentlyContinue
+          Write-Host "[OK] User '$username' created and added to Administrators"
+
+          # Also add runner's own account to be safe
+          net localgroup Administrators runneradmin /add 2>$null
+
+          # ── Enable RDP ───────────────────────────────────────────────
+          Set-ItemProperty `
+            -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server" `
+            -Name "fDenyTSConnections" -Value 0 -Type DWord
+          Write-Host "[OK] RDP enabled (fDenyTSConnections = 0)"
+
+          # ── Disable NLA (Network Level Authentication) ───────────────
+          Set-ItemProperty `
+            -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" `
+            -Name "UserAuthentication" -Value 0 -Type DWord
+          Write-Host "[OK] NLA disabled"
+
+          # ── Allow multiple concurrent RDP sessions ───────────────────
+          Set-ItemProperty `
+            -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server" `
+            -Name "fSingleSessionPerUser" -Value 0 -Type DWord
+
+          # ── Firewall rules ───────────────────────────────────────────
+          Enable-NetFirewallRule -DisplayGroup "Remote Desktop" -ErrorAction SilentlyContinue
+          # Explicit rule in case the group rule is missing
+          New-NetFirewallRule `
+            -Name "RDP-TCP-In" `
+            -DisplayName "Remote Desktop (TCP-In) Custom" `
+            -Enabled True -Direction Inbound -Protocol TCP `
+            -LocalPort 3389 -Action Allow -ErrorAction SilentlyContinue
+          Write-Host "[OK] Firewall rules configured"
+
+          # ── Restart TermService ──────────────────────────────────────
+          Restart-Service -Name TermService -Force
+          Write-Host "[OK] Terminal Services restarted"
+
+          # ── Verify RDP is listening ──────────────────────────────────
+          Start-Sleep -Seconds 3
+          $listening = Get-NetTCPConnection -LocalPort 3389 -State Listen -ErrorAction SilentlyContinue
+          if ($listening) {
+            Write-Host "[OK] RDP is LISTENING on port 3389"
+          } else {
+            Write-Host "[WARN] RDP port 3389 not yet detected – may take a moment"
+          }
+
+          Write-Host ""
+          Write-Host "  Username : $username"
+          Write-Host "  Password : $password"
+          Write-Host ""
+          Write-Host "========================================"
+          Write-Host "   RDP ENABLED SUCCESSFULLY            "
+          Write-Host "========================================"
+
+      # ──────────────────────────────────────────
+      # STEP 3 – Install Essential Tools (parallel)
+      # ──────────────────────────────────────────
       - name: Install Essential Tools
         shell: powershell
         run: |
-          choco install googlechrome -y --ignore-checksums
-          choco install 7zip -y
-          choco install git -y
+          Write-Host "Installing tools in background..."
 
+          # Refresh choco env
+          $env:ChocolateyInstall = "$env:ProgramData\chocolatey"
+
+          # Install all at once (faster than one-by-one)
+          choco install googlechrome 7zip git vscode -y `
+            --no-progress --ignore-checksums `
+            --limit-output 2>&1 | Tee-Object -FilePath "choco.log"
+
+          Write-Host "[OK] Tools installation triggered"
+
+      # ──────────────────────────────────────────
+      # STEP 4 – Download Cloudflared
+      # ──────────────────────────────────────────
       - name: Download Cloudflared
         shell: powershell
         run: |
-          Invoke-WebRequest `
-            -Uri "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe" `
-            -OutFile "cloudflared.exe"
+          Write-Host "Downloading cloudflared..."
 
-      - name: Start Cloudflare TCP Tunnel
+          $url  = "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe"
+          $dest = "$env:TEMP\cloudflared.exe"
+
+          # Use BITS for faster, reliable download
+          Start-BitsTransfer -Source $url -Destination $dest -ErrorAction SilentlyContinue
+
+          # Fallback to Invoke-WebRequest if BITS failed
+          if (-not (Test-Path $dest) -or (Get-Item $dest).Length -lt 1MB) {
+            Write-Host "BITS failed, using Invoke-WebRequest..."
+            [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+            Invoke-WebRequest -Uri $url -OutFile $dest -UseBasicParsing
+          }
+
+          $size = (Get-Item $dest).Length / 1MB
+          Write-Host "[OK] cloudflared downloaded: $([math]::Round($size,2)) MB -> $dest"
+
+          # Make globally accessible
+          Copy-Item $dest "C:\cloudflared.exe"
+
+      # ──────────────────────────────────────────
+      # STEP 5 – Start Tunnel & Display Info
+      # ──────────────────────────────────────────
+      - name: Start Cloudflare Tunnel & Display Connection Info
         shell: powershell
         run: |
-          Write-Host "Starting Cloudflare Tunnel..."
-
-          Start-Process `
-            -FilePath ".\cloudflared.exe" `
-            -ArgumentList "tunnel --url tcp://localhost:3389 --no-autoupdate" `
-            -RedirectStandardOutput "cf.log" `
-            -RedirectStandardError "cf-error.log" `
-            -WindowStyle Hidden
-
-          Start-Sleep -Seconds 20
-
-          Write-Host ""
           Write-Host "========================================"
-          Write-Host " CLOUDFARE RDP INFORMATION"
+          Write-Host "   Starting Cloudflare Tunnel           "
           Write-Host "========================================"
+
+          $logOut = "$env:TEMP\cf-out.log"
+          $logErr = "$env:TEMP\cf-err.log"
+
+          # Remove stale logs
+          Remove-Item $logOut,$logErr -Force -ErrorAction SilentlyContinue
+
+          # Start cloudflared TCP tunnel
+          $proc = Start-Process `
+            -FilePath "C:\cloudflared.exe" `
+            -ArgumentList "tunnel --url tcp://localhost:3389 --no-autoupdate --loglevel info" `
+            -RedirectStandardOutput $logOut `
+            -RedirectStandardError  $logErr `
+            -WindowStyle Hidden `
+            -PassThru `
+            -NoNewWindow
+
+          Write-Host "[OK] cloudflared started (PID: $($proc.Id))"
+
+          # ── Wait for tunnel URL (up to 60 s) ─────────────────────────
+          $tunnelUrl = $null
+          $maxWait   = 60
+          $elapsed   = 0
+
+          Write-Host "Waiting for tunnel URL"
+          while ($elapsed -lt $maxWait) {
+            Start-Sleep -Seconds 2
+            $elapsed += 2
+            Write-Host -NoNewline "."
+
+            # URL appears in stderr log
+            $content = ""
+            if (Test-Path $logErr) { $content += Get-Content $logErr -Raw -ErrorAction SilentlyContinue }
+            if (Test-Path $logOut) { $content += Get-Content $logOut -Raw -ErrorAction SilentlyContinue }
+
+            # Match trycloudflare URL  e.g. https://xxxx.trycloudflare.com
+            $match = [regex]::Match($content, 'https://[a-zA-Z0-9\-]+\.trycloudflare\.com')
+            if ($match.Success) {
+              $tunnelUrl = $match.Value
+              break
+            }
+
+            # Also check if process died
+            if ($proc.HasExited) {
+              Write-Host ""
+              Write-Host "[ERROR] cloudflared exited prematurely (code $($proc.ExitCode))"
+              Write-Host "--- STDOUT ---"
+              Get-Content $logOut -ErrorAction SilentlyContinue
+              Write-Host "--- STDERR ---"
+              Get-Content $logErr -ErrorAction SilentlyContinue
+              exit 1
+            }
+          }
+
           Write-Host ""
 
-          Get-Content cf.log
+          if (-not $tunnelUrl) {
+            Write-Host "[WARN] Tunnel URL not auto-detected. Dumping logs..."
+            Write-Host "--- STDOUT ---"
+            Get-Content $logOut -ErrorAction SilentlyContinue
+            Write-Host "--- STDERR ---"
+            Get-Content $logErr -ErrorAction SilentlyContinue
+          }
 
+          # ── Display connection info ───────────────────────────────────
           Write-Host ""
-          Write-Host "========================================"
-          Write-Host " LOGIN DETAILS"
-          Write-Host "========================================"
-          Write-Host ""
-          Write-Host "Username : runneradmin"
-          Write-Host "Password : P@ssw0rd123!"
-          Write-Host ""
-          Write-Host "Connect using Windows Remote Desktop"
-          Write-Host ""
+          Write-Host "╔══════════════════════════════════════════════╗"
+          Write-Host "║    PREMIUM WINDOWS RDP – CONNECTION INFO     ║"
+          Write-Host "╠══════════════════════════════════════════════╣"
+          if ($tunnelUrl) {
+            # Strip https:// for RDP client hostname
+            $rdpHost = $tunnelUrl -replace "https://",""
+            Write-Host "║  Tunnel URL : $tunnelUrl"
+            Write-Host "║"
+            Write-Host "║  RDP Host   : $rdpHost"
+            Write-Host "║  RDP Port   : 443 (via Cloudflare)"
+          } else {
+            Write-Host "║  [!] Tunnel URL detection failed"
+            Write-Host "║      Check logs above for the URL"
+          }
+          Write-Host "╠══════════════════════════════════════════════╣"
+          Write-Host "║  Username   : rdpadmin                       ║"
+          Write-Host "║  Password   : Premium@RDP2025!               ║"
+          Write-Host "╠══════════════════════════════════════════════╣"
+          Write-Host "║  HOW TO CONNECT:                             ║"
+          Write-Host "║  1. Install cloudflared on your PC           ║"
+          Write-Host "║     https://developers.cloudflare.com/       ║"
+          Write-Host "║     cloudflare-one/connections/connect-      ║"
+          Write-Host "║     networks/downloads/                      ║"
+          Write-Host "║                                              ║"
+          Write-Host "║  2. Run this command on YOUR machine:        ║"
+          if ($tunnelUrl) {
+            $rdpHost = $tunnelUrl -replace "https://",""
+            Write-Host "║  cloudflared access rdp --hostname           ║"
+            Write-Host "║    $rdpHost     ║"
+            Write-Host "║    --url rdp://localhost:13389               ║"
+            Write-Host "║                                              ║"
+            Write-Host "║  3. Open MSTSC / Remote Desktop:             ║"
+            Write-Host "║     Host: localhost:13389                    ║"
+          }
+          Write-Host "╚══════════════════════════════════════════════╝"
 
+      # ──────────────────────────────────────────
+      # STEP 6 – Keep Runner Alive (with heartbeat)
+      # ──────────────────────────────────────────
       - name: Keep Runner Alive
         shell: powershell
         run: |
-          Write-Host "Keeping runner alive..."
+          Write-Host "Runner will stay alive until timeout (360 min)"
+          Write-Host "Cloudflare tunnel is active."
+          Write-Host ""
+
+          $startTime = Get-Date
+          $interval  = 60   # heartbeat every 60 s
+          $iteration = 0
 
           while ($true) {
-            $time = Get-Date -Format "HH:mm:ss"
-            Write-Host "[$time] RDP Session Running..."
-            Start-Sleep -Seconds 300
+            $iteration++
+            $now     = Get-Date
+            $elapsed = [math]::Round(($now - $startTime).TotalMinutes, 1)
+            $time    = $now.ToString("HH:mm:ss")
+
+            # Heartbeat line
+            Write-Host "[$time] [+$elapsed min] Session alive | Iteration $iteration"
+
+            # Every 10 minutes, verify tunnel is still running
+            if ($iteration % 10 -eq 0) {
+              $cf = Get-Process -Name "cloudflared" -ErrorAction SilentlyContinue
+              if ($cf) {
+                Write-Host "[$time] Tunnel process OK (PID: $($cf.Id))"
+              } else {
+                Write-Host "[$time] [WARN] cloudflared not found – attempting restart"
+                $logOut = "$env:TEMP\cf-out-restart.log"
+                $logErr = "$env:TEMP\cf-err-restart.log"
+                Start-Process `
+                  -FilePath "C:\cloudflared.exe" `
+                  -ArgumentList "tunnel --url tcp://localhost:3389 --no-autoupdate" `
+                  -RedirectStandardOutput $logOut `
+                  -RedirectStandardError  $logErr `
+                  -WindowStyle Hidden -NoNewWindow
+                Write-Host "[$time] cloudflared restarted"
+              }
+
+              # Verify RDP still listening
+              $rdp = Get-NetTCPConnection -LocalPort 3389 -State Listen -ErrorAction SilentlyContinue
+              if (-not $rdp) {
+                Write-Host "[$time] [WARN] RDP not listening – restarting TermService"
+                Restart-Service -Name TermService -Force -ErrorAction SilentlyContinue
+              }
+            }
+
+            Start-Sleep -Seconds $interval
           }
