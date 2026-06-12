@@ -1,0 +1,286 @@
+# ============================================================
+#  Premium Windows noVNC via Cloudflare Tunnel
+#  Credit: Kobir Shah
+# ============================================================
+
+name: Premium Windows noVNC via Cloudflare Tunnel
+
+on:
+  workflow_dispatch:
+
+jobs:
+  rdp:
+    name: Premium Windows noVNC - Kobir Shah
+    runs-on: windows-latest
+    timeout-minutes: 360
+
+    steps:
+
+      # --------------------------------------------------------
+      # STEP 1 - System Performance Optimization
+      # --------------------------------------------------------
+      - name: System Performance Optimization
+        shell: powershell
+        run: |
+          Write-Host "========================================"
+          Write-Host "  Premium Windows noVNC"
+          Write-Host "  Credit: Kobir Shah"
+          Write-Host "========================================"
+          Write-Host ""
+          Write-Host "  Optimizing system performance..."
+          Write-Host ""
+
+          # High Performance power plan
+          $hp = powercfg -list | Select-String "High performance"
+          if ($hp) {
+            $guidMatch = [regex]::Match($hp.ToString(), "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
+            if ($guidMatch.Success) {
+              powercfg /setactive $guidMatch.Value 2>&1 | Out-Null
+              Write-Host "[OK] High Performance power plan activated"
+            } else {
+              powercfg /setactive SCHEME_BALANCED 2>&1 | Out-Null
+            }
+          } else {
+            powercfg /setactive SCHEME_BALANCED 2>&1 | Out-Null
+          }
+
+          # Disable sleep / hibernate / monitor timeout
+          powercfg /change standby-timeout-ac 0
+          powercfg /change hibernate-timeout-ac 0
+          powercfg /change monitor-timeout-ac 0
+          Write-Host "[OK] Sleep and hibernate disabled"
+
+          # Disable Windows Update service
+          Stop-Service -Name wuauserv -Force -ErrorAction SilentlyContinue
+          Set-Service -Name wuauserv -StartupType Disabled -ErrorAction SilentlyContinue
+          Write-Host "[OK] Windows Update disabled"
+
+      # --------------------------------------------------------
+      # STEP 2 - Install VNC, noVNC, and Websockify
+      # --------------------------------------------------------
+      - name: Install VNC and noVNC Components
+        shell: powershell
+        run: |
+          Write-Host "========================================"
+          Write-Host "  Setting up noVNC Environment"
+          Write-Host "  Credit: Kobir Shah"
+          Write-Host "========================================"
+          Write-Host ""
+
+          # 1. Install TightVNC using Chocolatey (Pre-installed on GitHub Runners)
+          Write-Host "  Installing TightVNC Server..."
+          choco install tightvnc -y --no-progress
+          
+          # 2. Configure TightVNC to allow connections without a password (Cloudflare provides the security)
+          Write-Host "  Configuring TightVNC..."
+          $regPath = "HKLM:\SOFTWARE\TightVNC\Server"
+          Set-ItemProperty -Path $regPath -Name "AcceptRfbConnections" -Value 1 -Type DWord
+          Set-ItemProperty -Path $regPath -Name "UseVncAuthentication" -Value 0 -Type DWord
+          Set-ItemProperty -Path $regPath -Name "AllowLoopback" -Value 1 -Type DWord
+          Set-ItemProperty -Path $regPath -Name "LoopbackOnly" -Value 1 -Type DWord
+          
+          # Restart VNC service to apply changes
+          Restart-Service tvnserver -Force
+          Write-Host "[OK] TightVNC installed and configured"
+
+          # 3. Install Websockify (Python tool to bridge VNC to WebSockets)
+          Write-Host "  Installing Websockify..."
+          pip install websockify --quiet
+          Write-Host "[OK] Websockify installed"
+
+          # 4. Download noVNC Web Interface
+          Write-Host "  Downloading noVNC web files..."
+          if (Test-Path "C:\noVNC") { Remove-Item "C:\noVNC" -Recurse -Force }
+          git clone https://github.com/novnc/noVNC.git C:\noVNC --quiet
+          Write-Host "[OK] noVNC downloaded"
+
+          # 5. Start Websockify (Bridges Port 6080 Web to Port 5900 VNC)
+          Write-Host "  Starting Websockify on port 6080..."
+          Start-Process python -ArgumentList "-m", "websockify", "--web", "C:\noVNC", "6080", "localhost:5900" -NoNewWindow
+          Start-Sleep -Seconds 3
+          Write-Host "[OK] Websockify started"
+
+      # --------------------------------------------------------
+      # STEP 3 - Download Cloudflared
+      # --------------------------------------------------------
+      - name: Download Cloudflared
+        shell: powershell
+        run: |
+          $url     = "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe"
+          $dest    = "C:\cloudflared.exe"
+          $minSize = 1048576
+
+          if (Test-Path $dest) { Remove-Item $dest -Force -ErrorAction SilentlyContinue }
+
+          try {
+            Start-BitsTransfer -Source $url -Destination $dest -TransferType Download -ErrorAction Stop
+          } catch {
+            [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+            Invoke-WebRequest -Uri $url -OutFile $dest -UseBasicParsing -TimeoutSec 120
+          }
+
+          if ((Test-Path $dest) -and (Get-Item $dest).Length -ge $minSize) {
+            Write-Host "[OK] Cloudflared downloaded successfully"
+          } else {
+            Write-Error "Download failed"; exit 1
+          }
+
+      # --------------------------------------------------------
+      # STEP 4 - Start Cloudflare Tunnel and Show Info
+      # --------------------------------------------------------
+      - name: Start Cloudflare Tunnel and Show Connection Info
+        shell: powershell
+        run: |
+          $logOut = "$env:TEMP\cf-out.log"
+          $logErr = "$env:TEMP\cf-err.log"
+          Remove-Item $logOut, $logErr -Force -ErrorAction SilentlyContinue
+
+          # Exposing Port 6080 (Websockify/noVNC) instead of 3389 (RDP)
+          $proc = Start-Process -FilePath "C:\cloudflared.exe" -ArgumentList "tunnel --url http://localhost:6089 --no-autoupdate --loglevel info" -RedirectStandardOutput $logOut -RedirectStandardError $logErr -NoNewWindow -PassThru
+          Write-Host "[OK] Cloudflared started - PID: $($proc.Id)"
+          Write-Host "  Waiting for tunnel URL (max 90 seconds)..."
+
+          $tunnelUrl = ""
+          $maxWait   = 90
+          $elapsed   = 0
+
+          while ($elapsed -lt $maxWait) {
+            Start-Sleep -Seconds 3
+            $elapsed += 3
+
+            $content = ""
+            if (Test-Path $logErr) { $content += Get-Content $logErr -Raw -ErrorAction SilentlyContinue }
+            if (Test-Path $logOut) { $content += Get-Content $logOut -Raw -ErrorAction SilentlyContinue }
+
+            if ($content.Length -gt 0) {
+              $match = [regex]::Match($content, "https://[a-zA-Z0-9\-]+\.trycloudflare\.com")
+              if ($match.Success) {
+                $tunnelUrl = $match.Value
+                break
+              }
+            }
+
+            if ($proc.HasExited -and $tunnelUrl -eq "") {
+              Write-Host "[ERROR] Cloudflared exited prematurely."
+              Get-Content $logErr -ErrorAction SilentlyContinue
+              exit 1
+            }
+            Write-Host "  [$elapsed / $maxWait sec] Still waiting..."
+          }
+
+          Write-Host ""
+          Write-Host "========================================"
+          Write-Host "  PREMIUM noVNC - CONNECTION INFORMATION"
+          Write-Host "  Credit: Kobir Shah"
+          Write-Host "========================================"
+          Write-Host ""
+
+          if ($tunnelUrl -ne "") {
+            $tunnelUrl | Out-File "C:\tunnel-url.txt" -Encoding UTF8
+            
+            Write-Host "  Your noVNC URL : $tunnelUrl/vnc.html"
+            Write-Host ""
+            Write-Host "========================================"
+            Write-Host "  HOW TO CONNECT"
+            Write-Host "========================================"
+            Write-Host ""
+            Write-Host "  1. Open your web browser (Chrome, Firefox, Edge, etc.)"
+            Write-Host "  2. Go to this URL:"
+            Write-Host ""
+            Write-Host "     $tunnelUrl/vnc.html"
+            Write-Host ""
+            Write-Host "  3. Click the 'Connect' button on the webpage."
+            Write-Host "  4. You will instantly see the Windows Desktop!"
+            Write-Host ""
+            Write-Host "  NOTE: No password required. Cloudflare Tunnel secures the connection."
+          } else {
+            Write-Host "  [WARN] Tunnel URL not detected. Check logs below."
+            Get-Content $logErr -ErrorAction SilentlyContinue
+          }
+
+      # --------------------------------------------------------
+      # STEP 5 - Keep Runner Alive with Health Checks
+      # --------------------------------------------------------
+      - name: Keep Runner Alive
+        shell: powershell
+        run: |
+          Write-Host "========================================"
+          Write-Host "  Session Keep-Alive Active"
+          Write-Host "  Credit: Kobir Shah"
+          Write-Host "========================================"
+
+          $startTime  = Get-Date
+          $iteration  = 0
+          $cfExe      = "C:\cloudflared.exe"
+          $tunnelArgs = "tunnel --url http://localhost:6080 --no-autoupdate"
+
+          while ($true) {
+            $iteration++
+            $now     = Get-Date
+            $elapsed = [math]::Round(($now - $startTime).TotalMinutes, 1)
+            $timeStr = $now.ToString("HH:mm:ss")
+
+            Write-Host "[$timeStr] Alive | Elapsed: $elapsed min | Tick: $iteration"
+
+            # Health check every 10 minutes
+            if ($iteration % 10 -eq 0) {
+              Write-Host "[$timeStr] ---- Health Check ----"
+
+              # Check VNC Server
+              $vnc = Get-Service -Name tvnserver -ErrorAction SilentlyContinue
+              if ($vnc.Status -ne 'Running') {
+                Write-Host "[$timeStr] [WARN] VNC stopped - restarting..."
+                Start-Service tvnserver -ErrorAction SilentlyContinue
+              } else {
+                Write-Host "[$timeStr] [OK] VNC Server running"
+              }
+
+              # Check Cloudflared Process
+              $cf = Get-Process -Name "cloudflared" -ErrorAction SilentlyContinue
+              if (-not $cf) {
+                Write-Host "[$timeStr] [WARN] Cloudflared stopped - restarting..."
+                
+                $rlOut = "$env:TEMP\cf-restart-out.log"
+                $rlErr = "$env:TEMP\cf-restart-err.log"
+                Remove-Item $rlOut, $rlErr -Force -ErrorAction SilentlyContinue
+                
+                Start-Process -FilePath $cfExe -ArgumentList $tunnelArgs -RedirectStandardOutput $rlOut -RedirectStandardError $rlErr -NoNewWindow
+                Start-Sleep -Seconds 5
+                
+                $newUrl = ""
+                for ($i = 0; $i -lt 10; $i++) {
+                  Start-Sleep -Seconds 3
+                  $c = ""
+                  if (Test-Path $rlErr) { $c += Get-Content $rlErr -Raw -ErrorAction SilentlyContinue }
+                  if (Test-Path $rlOut) { $c += Get-Content $rlOut -Raw -ErrorAction SilentlyContinue }
+                  $m = [regex]::Match($c, "https://[a-zA-Z0-9\-]+\.trycloudflare\.com")
+                  if ($m.Success) { $newUrl = $m.Value; break }
+                }
+                
+                if ($newUrl) {
+                  $newUrl | Out-File "C:\tunnel-url.txt" -Encoding UTF8
+                  Write-Host "[$timeStr] [!!!] TUNNEL URL CHANGED! [!!!]"
+                  Write-Host "[$timeStr] [!!!] New Browser URL : $newUrl/vnc.html"
+                } else {
+                  Write-Host "[$timeStr] [ERROR] Cloudflared restarted but new URL not found yet."
+                }
+              } else {
+                Write-Host "[$timeStr] [OK] Cloudflared running - PID: $($cf.Id)"
+              }
+
+              Write-Host "[$timeStr] ---- Health Check Complete ----"
+            }
+
+            Start-Sleep -Seconds 60
+          }
+
+      # --------------------------------------------------------
+      # STEP 6 - Cleanup on Cancel
+      # --------------------------------------------------------
+      - name: Cleanup on Cancel
+        if: cancelled()
+        shell: powershell
+        run: |
+          Get-Process -Name "cloudflared" -ErrorAction SilentlyContinue | Stop-Process -Force
+          Stop-Service -Name tvnserver -Force -ErrorAction SilentlyContinue
+          Write-Host "[OK] Cleanup complete - cancelled workflow"
