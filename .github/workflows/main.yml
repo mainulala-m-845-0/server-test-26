@@ -78,8 +78,8 @@ jobs:
           Write-Host "========================================"
 
           # ── Create dedicated RDP admin user ──────────────────────────
-          $username = "rdpadmin"
-          $password = "Premium@RDP2025!"
+          $username = "1"
+          $password = "1"
 
           # Remove if already exists
           net user $username /delete 2>$null
