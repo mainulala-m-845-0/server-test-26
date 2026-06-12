@@ -1,0 +1,232 @@
+name: Premium Windows noVNC + Cloudflare Tunnel
+
+on:
+  workflow_dispatch:
+
+jobs:
+  windows-vnc:
+    name: Windows noVNC Cloudflare
+    runs-on: windows-2025
+    timeout-minutes: 360
+
+    steps:
+
+      # =========================================================
+      # STEP 1 — SYSTEM OPTIMIZATION
+      # =========================================================
+      - name: Optimize Windows Runner
+        shell: powershell
+        run: |
+          Write-Host "===================================="
+          Write-Host " PREMIUM WINDOWS noVNC"
+          Write-Host "===================================="
+
+          powercfg /setactive SCHEME_MIN
+
+          powercfg /change standby-timeout-ac 0
+          powercfg /change monitor-timeout-ac 0
+          powercfg /change hibernate-timeout-ac 0
+
+          Stop-Service wuauserv -Force -ErrorAction SilentlyContinue
+          Set-Service wuauserv -StartupType Disabled -ErrorAction SilentlyContinue
+
+          New-NetFirewallRule `
+            -DisplayName "VNC-5900" `
+            -Direction Inbound `
+            -Protocol TCP `
+            -LocalPort 5900 `
+            -Action Allow
+
+          New-NetFirewallRule `
+            -DisplayName "NOVNC-6080" `
+            -Direction Inbound `
+            -Protocol TCP `
+            -LocalPort 6080 `
+            -Action Allow
+
+          Write-Host "[OK] Optimization complete"
+
+      # =========================================================
+      # STEP 2 — INSTALL ULTRAVNC
+      # =========================================================
+      - name: Install UltraVNC
+        shell: powershell
+        run: |
+          choco install ultravnc -y --no-progress
+
+          Start-Sleep -Seconds 10
+
+          $cfg = "C:\Program Files\uvnc bvba\UltraVNC\ultravnc.ini"
+
+          if (Test-Path $cfg) {
+
+            (Get-Content $cfg) `
+              -replace "LoopbackOnly=0","LoopbackOnly=1" `
+              -replace "AllowLoopback=0","AllowLoopback=1" `
+              | Set-Content $cfg
+
+          }
+
+          Start-Service uvnc_service
+          Start-Sleep -Seconds 15
+
+          $test = Test-NetConnection localhost -Port 5900
+
+          if ($test.TcpTestSucceeded) {
+            Write-Host "[OK] UltraVNC running on 5900"
+          } else {
+            Write-Host "[ERROR] UltraVNC failed"
+            exit 1
+          }
+
+      # =========================================================
+      # STEP 3 — START INTERACTIVE DESKTOP
+      # =========================================================
+      - name: Enable Interactive Desktop
+        shell: powershell
+        run: |
+          cmd /c start explorer.exe
+          Start-Sleep -Seconds 5
+
+      # =========================================================
+      # STEP 4 — INSTALL PYTHON + WEBSOCKIFY
+      # =========================================================
+      - name: Install Websockify
+        shell: powershell
+        run: |
+          python -m pip install --upgrade pip
+
+          pip install websockify --quiet
+
+          if (Test-Path "C:\noVNC") {
+            Remove-Item "C:\noVNC" -Recurse -Force
+          }
+
+          git clone https://github.com/novnc/noVNC.git C:\noVNC
+
+          Write-Host "[OK] noVNC installed"
+
+      # =========================================================
+      # STEP 5 — START WEBSOCKIFY
+      # =========================================================
+      - name: Start noVNC Bridge
+        shell: powershell
+        run: |
+          Start-Process cmd `
+            -ArgumentList "/c python -m websockify --web C:\noVNC 6080 localhost:5900" `
+            -WindowStyle Hidden
+
+          Start-Sleep -Seconds 10
+
+          $ws = Test-NetConnection localhost -Port 6080
+
+          if ($ws.TcpTestSucceeded) {
+            Write-Host "[OK] noVNC bridge active"
+          } else {
+            Write-Host "[ERROR] noVNC bridge failed"
+            exit 1
+          }
+
+      # =========================================================
+      # STEP 6 — DOWNLOAD CLOUDFLARED
+      # =========================================================
+      - name: Download Cloudflared
+        shell: powershell
+        run: |
+          Invoke-WebRequest `
+            -Uri "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe" `
+            -OutFile "C:\cloudflared.exe"
+
+          if (Test-Path "C:\cloudflared.exe") {
+            Write-Host "[OK] Cloudflared downloaded"
+          } else {
+            Write-Host "[ERROR] Cloudflared missing"
+            exit 1
+          }
+
+      # =========================================================
+      # STEP 7 — START CLOUDFLARE TUNNEL
+      # =========================================================
+      - name: Create Cloudflare Tunnel
+        shell: powershell
+        run: |
+          $log = "$env:TEMP\cloudflared.log"
+
+          Start-Process `
+            -FilePath "C:\cloudflared.exe" `
+            -ArgumentList "tunnel --url http://localhost:6080 --protocol http2 --no-autoupdate" `
+            -RedirectStandardOutput $log `
+            -RedirectStandardError $log `
+            -WindowStyle Hidden
+
+          Write-Host ""
+          Write-Host "Waiting for Cloudflare URL..."
+          Write-Host ""
+
+          $url = ""
+
+          for ($i = 0; $i -lt 60; $i++) {
+
+            Start-Sleep -Seconds 3
+
+            if (Test-Path $log) {
+
+              $content = Get-Content $log -Raw
+
+              $match = [regex]::Match(
+                $content,
+                "https://[a-zA-Z0-9-]+\.trycloudflare\.com"
+              )
+
+              if ($match.Success) {
+                $url = $match.Value
+                break
+              }
+            }
+          }
+
+          if ($url -eq "") {
+            Write-Host "[ERROR] Tunnel URL not found"
+            Get-Content $log
+            exit 1
+          }
+
+          Write-Host ""
+          Write-Host "===================================="
+          Write-Host " WINDOWS noVNC READY"
+          Write-Host "===================================="
+          Write-Host ""
+
+          Write-Host "OPEN THIS URL:"
+          Write-Host ""
+          Write-Host "$url/vnc.html?autoconnect=true&resize=remote&quality=9&compression=9"
+          Write-Host ""
+          Write-Host "===================================="
+
+      # =========================================================
+      # STEP 8 — KEEP RUNNER ALIVE
+      # =========================================================
+      - name: Keep Alive
+        shell: powershell
+        run: |
+          Write-Host "Keep-alive active"
+
+          while ($true) {
+
+            $time = Get-Date -Format "HH:mm:ss"
+
+            Write-Host "[$time] Runner alive"
+
+            $cf = Get-Process cloudflared -ErrorAction SilentlyContinue
+            $uv = Get-Service uvnc_service -ErrorAction SilentlyContinue
+
+            if (-not $cf) {
+              Write-Host "[WARN] Cloudflared stopped"
+            }
+
+            if ($uv.Status -ne "Running") {
+              Write-Host "[WARN] UltraVNC stopped"
+            }
+
+            Start-Sleep -Seconds 60
+          }
