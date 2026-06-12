@@ -11,13 +11,13 @@ jobs:
     steps:
 
       # =========================================================
-      # STEP 1 — SYSTEM OPTIMIZATION
+      # STEP 1 — OPTIMIZE WINDOWS
       # =========================================================
       - name: Optimize Windows
         shell: powershell
         run: |
           Write-Host "===================================="
-          Write-Host " PREMIUM RUSTDESK WINDOWS"
+          Write-Host " PREMIUM RUSTDESK WINDOWS 2022"
           Write-Host "===================================="
 
           powercfg /setactive SCHEME_MIN
@@ -32,28 +32,7 @@ jobs:
           Write-Host "[OK] Windows optimized"
 
       # =========================================================
-      # STEP 2 — DOWNLOAD RUSTDESK
-      # =========================================================
-      - name: Download RustDesk
-        shell: powershell
-        run: |
-          $url = "https://github.com/rustdesk/rustdesk/releases/latest/download/rustdesk-1.4.7-x86_64.exe"
-          $out = "$env:TEMP\rustdesk.exe"
-
-          Invoke-WebRequest `
-            -Uri $url `
-            -OutFile $out `
-            -UseBasicParsing
-
-          if (Test-Path $out) {
-            Write-Host "[OK] RustDesk downloaded"
-          } else {
-            Write-Host "[ERROR] Download failed"
-            exit 1
-          }
-
-      # =========================================================
-      # STEP 3 — START INTERACTIVE DESKTOP
+      # STEP 2 — START EXPLORER DESKTOP
       # =========================================================
       - name: Start Explorer Desktop
         shell: powershell
@@ -65,76 +44,103 @@ jobs:
           Write-Host "[OK] Explorer desktop started"
 
       # =========================================================
+      # STEP 3 — DOWNLOAD RUSTDESK
+      # =========================================================
+      - name: Download RustDesk
+        shell: powershell
+        run: |
+          $url = "https://github.com/rustdesk/rustdesk/releases/latest/download/rustdesk-1.4.7-x86_64.exe"
+
+          $out = Join-Path $env:TEMP "rustdesk.exe"
+
+          Invoke-WebRequest `
+            -Uri $url `
+            -OutFile $out `
+            -UseBasicParsing
+
+          if (Test-Path $out) {
+
+            Write-Host "[OK] RustDesk downloaded"
+
+          } else {
+
+            Write-Host "[ERROR] RustDesk download failed"
+            exit 1
+          }
+
+      # =========================================================
       # STEP 4 — START RUSTDESK
       # =========================================================
       - name: Launch RustDesk
         shell: powershell
         run: |
-          $rustdesk = "$env:TEMP\rustdesk.exe"
+          $rustdesk = Join-Path $env:TEMP "rustdesk.exe"
 
           Start-Process `
-            -FilePath $rustdesk `
-            -ArgumentList "--silent-install" `
-            -Verb RunAs
+            -FilePath $rustdesk
 
-          Start-Sleep -Seconds 25
+          Start-Sleep -Seconds 40
 
-          $proc = Get-Process | Where-Object {
-            $_.ProcessName -match "rustdesk"
-          }
+          $proc = Get-Process rustdesk -ErrorAction SilentlyContinue
 
           if ($proc) {
+
             Write-Host "[OK] RustDesk started"
+
           } else {
-            Write-Host "[ERROR] RustDesk not running"
+
+            Write-Host "[ERROR] RustDesk failed"
             exit 1
           }
 
       # =========================================================
-      # STEP 5 — GET RUSTDESK ID
+      # STEP 5 — SHOW RUSTDESK ID
       # =========================================================
-      - name: Get RustDesk ID
+      - name: Show RustDesk Information
         shell: powershell
         run: |
-          $possible = @(
-            "$env:APPDATA\RustDesk\config\RustDesk.toml",
-            "$env:APPDATA\RustDesk\config\RustDesk2.toml",
-            "$env:USERPROFILE\AppData\Roaming\RustDesk\config\RustDesk.toml"
-          )
-
-          $config = $null
-
-          foreach ($p in $possible) {
-            if (Test-Path $p) {
-              $config = $p
-              break
-            }
-          }
-
-          if (-not $config) {
-
-            Write-Host ""
-            Write-Host "[WARN] Config not found yet"
-            Write-Host ""
-            Write-Host "Open RustDesk window manually from runner desktop"
-            Write-Host "ID will appear there"
-            Write-Host ""
-
-            Get-Process rustdesk
-
-            exit 0
-          }
-
           Write-Host ""
           Write-Host "===================================="
           Write-Host " RUSTDESK INFORMATION"
           Write-Host "===================================="
           Write-Host ""
 
-          Get-Content $config
+          $configPaths = @(
+            "$env:APPDATA\RustDesk\config\RustDesk.toml",
+            "$env:USERPROFILE\AppData\Roaming\RustDesk\config\RustDesk.toml",
+            "$env:APPDATA\RustDesk\config\RustDesk2.toml"
+          )
 
-          Write-Host ""
-          Write-Host "===================================="
+          $found = $false
+
+          foreach ($path in $configPaths) {
+
+            if (Test-Path $path) {
+
+              Write-Host "[OK] Config Found:"
+              Write-Host $path
+              Write-Host ""
+
+              Get-Content $path
+
+              $found = $true
+
+              break
+            }
+          }
+
+          if (-not $found) {
+
+            Write-Host "[WARN] RustDesk config not generated yet"
+            Write-Host ""
+            Write-Host "RustDesk processes running:"
+            Write-Host ""
+
+            Get-Process rustdesk -ErrorAction SilentlyContinue
+
+            Write-Host ""
+            Write-Host "Open runner desktop manually if needed."
+          }
 
       # =========================================================
       # STEP 6 — KEEP RUNNER ALIVE
@@ -147,6 +153,8 @@ jobs:
           Write-Host " KEEP ALIVE ACTIVE"
           Write-Host "===================================="
 
+          $rustdeskExe = Join-Path $env:TEMP "rustdesk.exe"
+
           while ($true) {
 
             $time = Get-Date -Format "HH:mm:ss"
@@ -154,13 +162,17 @@ jobs:
             $proc = Get-Process rustdesk -ErrorAction SilentlyContinue
 
             if ($proc) {
+
               Write-Host "[$time] RustDesk Running"
+
             } else {
-              Write-Host "[$time] RustDesk Stopped — Restarting"
 
-              Start-Process "$env:TEMP\rustdesk.exe"
+              Write-Host "[$time] RustDesk stopped — restarting"
 
-              Start-Sleep -Seconds 10
+              Start-Process `
+                -FilePath $rustdeskExe
+
+              Start-Sleep -Seconds 15
             }
 
             Start-Sleep -Seconds 60
