@@ -70,75 +70,71 @@ jobs:
       # ──────────────────────────────────────────
       # STEP 2 – Create Admin User & Enable RDP
       # ──────────────────────────────────────────
-      - name: Enable Remote Desktop & Create User
-        shell: powershell
-        run: |
-          Write-Host "========================================"
-          Write-Host "   Enabling Premium Windows RDP         "
-          Write-Host "========================================"
+       - name: Enable Remote Desktop & Create User
+  shell: powershell
+  run: |
+    Write-Host "========================================"
+    Write-Host "   Enabling Premium Windows RDP         "
+    Write-Host "========================================"
 
-          # ── Create dedicated RDP admin user ──────────────────────────
-          $username = "1"
-          $password = "1"
+    $username = "1"
+    $password = "1"
 
-          # Remove if already exists
-          net user $username /delete 2>$null
+    net user $username /delete 2>&1 | Out-Null
 
-          net user $username $password /add /expires:never /passwordchg:no
-          net localgroup Administrators     $username /add
-          net localgroup "Remote Desktop Users" $username /add /ErrorAction SilentlyContinue
-          Write-Host "[OK] User '$username' created and added to Administrators"
+    net user $username $password /add /expires:never /passwordchg:no
+    net localgroup Administrators $username /add
+    net localgroup "Remote Desktop Users" $username /add 2>&1 | Out-Null
+    Write-Host "[OK] User '$username' created and added to Administrators"
 
-          # Also add runner's own account to be safe
-          net localgroup Administrators runneradmin /add 2>$null
+    net localgroup Administrators runneradmin /add 2>&1 | Out-Null
 
-          # ── Enable RDP ───────────────────────────────────────────────
-          Set-ItemProperty `
-            -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server" `
-            -Name "fDenyTSConnections" -Value 0 -Type DWord
-          Write-Host "[OK] RDP enabled (fDenyTSConnections = 0)"
+    Set-ItemProperty `
+      -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server" `
+      -Name "fDenyTSConnections" -Value 0 -Type DWord
+    Write-Host "[OK] RDP enabled"
 
-          # ── Disable NLA (Network Level Authentication) ───────────────
-          Set-ItemProperty `
-            -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" `
-            -Name "UserAuthentication" -Value 0 -Type DWord
-          Write-Host "[OK] NLA disabled"
+    Set-ItemProperty `
+      -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" `
+      -Name "UserAuthentication" -Value 0 -Type DWord
+    Write-Host "[OK] NLA disabled"
 
-          # ── Allow multiple concurrent RDP sessions ───────────────────
-          Set-ItemProperty `
-            -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server" `
-            -Name "fSingleSessionPerUser" -Value 0 -Type DWord
+    Set-ItemProperty `
+      -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server" `
+      -Name "fSingleSessionPerUser" -Value 0 -Type DWord
+    Write-Host "[OK] Multiple sessions allowed"
 
-          # ── Firewall rules ───────────────────────────────────────────
-          Enable-NetFirewallRule -DisplayGroup "Remote Desktop" -ErrorAction SilentlyContinue
-          # Explicit rule in case the group rule is missing
-          New-NetFirewallRule `
-            -Name "RDP-TCP-In" `
-            -DisplayName "Remote Desktop (TCP-In) Custom" `
-            -Enabled True -Direction Inbound -Protocol TCP `
-            -LocalPort 3389 -Action Allow -ErrorAction SilentlyContinue
-          Write-Host "[OK] Firewall rules configured"
+    Enable-NetFirewallRule -DisplayGroup "Remote Desktop" -ErrorAction SilentlyContinue
 
-          # ── Restart TermService ──────────────────────────────────────
-          Restart-Service -Name TermService -Force
-          Write-Host "[OK] Terminal Services restarted"
+    New-NetFirewallRule `
+      -Name "RDP-TCP-In-Custom" `
+      -DisplayName "Remote Desktop (TCP-In) Custom" `
+      -Enabled True `
+      -Direction Inbound `
+      -Protocol TCP `
+      -LocalPort 3389 `
+      -Action Allow `
+      -ErrorAction SilentlyContinue | Out-Null
+    Write-Host "[OK] Firewall rules configured"
 
-          # ── Verify RDP is listening ──────────────────────────────────
-          Start-Sleep -Seconds 3
-          $listening = Get-NetTCPConnection -LocalPort 3389 -State Listen -ErrorAction SilentlyContinue
-          if ($listening) {
-            Write-Host "[OK] RDP is LISTENING on port 3389"
-          } else {
-            Write-Host "[WARN] RDP port 3389 not yet detected – may take a moment"
-          }
+    Restart-Service -Name TermService -Force
+    Write-Host "[OK] Terminal Services restarted"
 
-          Write-Host ""
-          Write-Host "  Username : $username"
-          Write-Host "  Password : $password"
-          Write-Host ""
-          Write-Host "========================================"
-          Write-Host "   RDP ENABLED SUCCESSFULLY            "
-          Write-Host "========================================"
+    Start-Sleep -Seconds 3
+    $listening = Get-NetTCPConnection -LocalPort 3389 -State Listen -ErrorAction SilentlyContinue
+    if ($listening) {
+      Write-Host "[OK] RDP is LISTENING on port 3389"
+    } else {
+      Write-Host "[WARN] RDP port 3389 not yet detected - may take a moment"
+    }
+
+    Write-Host ""
+    Write-Host "  Username : $username"
+    Write-Host "  Password : $password"
+    Write-Host ""
+    Write-Host "========================================"
+    Write-Host "   RDP ENABLED SUCCESSFULLY            "
+    Write-Host "========================================"
 
       # ──────────────────────────────────────────
       # STEP 3 – Install Essential Tools (parallel)
