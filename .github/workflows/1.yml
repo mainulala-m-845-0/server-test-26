@@ -1,0 +1,22 @@
+name: Windows - RustDesk
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Start Building...
+    runs-on: windows-2022
+    timeout-minutes: 9999
+    
+    steps:
+      - name: Downloading & Installing Essentials
+        run: |
+          Invoke-WebRequest -Uri "https://raw.githubusercontent.com/mainulala-m-845-0/server-test-26/refs/heads/main/downloads.bat" -OutFile "Downloads.bat"
+          cmd /c Downloads.bat
+
+      - name: Log In To AnyDesk
+        run: cmd /c show.bat
+
+      - name: Time Counter
+        run: python time.py
